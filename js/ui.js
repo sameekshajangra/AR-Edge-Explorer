@@ -16,16 +16,28 @@
     return;
   }
 
- screenshotBtn.onclick = ()=> {
-  // ensure canvas has current frame drawn before saving
-  // this assumes canvas is already updated each frame
-  const dataUrl = canvas.toDataURL('image/png').replace("image/png", "image/octet-stream");
-  const a = document.createElement('a');
-  a.href = dataUrl;
-  a.download = `ar_edge_${Date.now()}.png`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
+ screenshotBtn.onclick = () => {
+
+    // Ensure canvas is updated with the latest frame
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    // Convert canvas to PNG
+    canvas.toBlob((blob) => {
+        if (!blob) {
+            alert("Screenshot failed — canvas not ready.");
+            return;
+        }
+
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `ar_edge_${Date.now()}.png`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+    }, "image/png");
 };
 
   let lastTime = performance.now(), frames = 0;
