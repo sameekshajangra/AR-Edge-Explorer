@@ -33,14 +33,6 @@
     }
 
     try {
-      // Check for available devices to decide whether to show switch button
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      const videoDevices = devices.filter(device => device.kind === 'videoinput');
-
-      if (videoDevices.length > 1) {
-        switchCameraBtn.style.display = 'inline-block';
-      }
-
       // Constraints based on current mode
       const constraints = {
         video: {
@@ -53,6 +45,16 @@
 
       stream = await navigator.mediaDevices.getUserMedia(constraints);
       video.srcObject = stream;
+
+      // Check for available devices AFTER getting permission
+      // This is crucial for iOS/Android where devices are hidden until permission is granted
+      navigator.mediaDevices.enumerateDevices().then(devices => {
+        const videoDevices = devices.filter(device => device.kind === 'videoinput');
+        console.log("Video devices found:", videoDevices.length);
+        if (videoDevices.length > 1) {
+          switchCameraBtn.style.display = 'inline-block';
+        }
+      }).catch(err => console.error("Error enumerating devices:", err));
 
       // wait until metadata (size) is available
       video.addEventListener("loadedmetadata", () => {
