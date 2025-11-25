@@ -16,10 +16,17 @@
     return;
   }
 
-  screenshotBtn.onclick = ()=> {
-    const dataUrl = canvas.toDataURL('image/png');
-    const a = document.createElement('a'); a.href = dataUrl; a.download = 'screenshot.png'; a.click();
-  };
+ screenshotBtn.onclick = ()=> {
+  // ensure canvas has current frame drawn before saving
+  // this assumes canvas is already updated each frame
+  const dataUrl = canvas.toDataURL('image/png').replace("image/png", "image/octet-stream");
+  const a = document.createElement('a');
+  a.href = dataUrl;
+  a.download = `ar_edge_${Date.now()}.png`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+};
 
   let lastTime = performance.now(), frames = 0;
   function updateFPS() {
