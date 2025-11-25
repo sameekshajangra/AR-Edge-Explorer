@@ -40,125 +40,183 @@
     return out;
   }
 
-  // -----------------------
-  // Modes object (colorized, distinct outputs)
+    // -----------------------
+  // Modes object (VERY visually distinct outputs)
   // -----------------------
   const Modes = {
+    // 1) CANNY → pure edge map (white on black)
     canny: function(src) {
-      const gray = new cv.Mat();
+      const gray = new cv.Mat(); 
       cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
       const edges = new cv.Mat();
-      cv.Canny(gray, edges, 40, 120);
+      cv.Canny(gray, edges, 80, 160);   // strong thresholds
 
-      // Overlay edges (reddish tint) on original copy
-      const overlay = src.clone();
-      for (let r = 0; r < overlay.rows; r++) {
-        for (let c = 0; c < overlay.cols; c++) {
-          if (edges.ucharPtr(r, c)[0] > 0) {
-            // overlay: reduce G,B and boost R-ish (B,G,R,A order in Mat)
-            overlay.ucharPtr(r, c)[0] = Math.min(255, overlay.ucharPtr(r, c)[0] + 80); // B
-            overlay.ucharPtr(r, c)[1] = Math.max(0, overlay.ucharPtr(r, c)[1] - 80);   // G
-            overlay.ucharPtr(r, c)[2] = Math.max(0, overlay.ucharPtr(r, c)[2] - 80);   // R
-          }
-        }
-      }
+      // show as plain white edges on black
+      const out = new cv.Mat();
+      cv.cvtColor(edges, out, cv.COLOR_GRAY2RGBA);
 
-      gray.delete(); edges.delete();
-      return overlay;
+      gray.delete(); 
+      edges.delete();
+      return out;
     },
 
+    // 2) SOBEL → colorful gradient heatmap
     sobel: function(src) {
-      const gray = new cv.Mat(); cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+      const gray = new cv.Mat(); 
+      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
       const gx = new cv.Mat(), gy = new cv.Mat();
       cv.Sobel(gray, gx, cv.CV_16S, 1, 0, 3);
       cv.Sobel(gray, gy, cv.CV_16S, 0, 1, 3);
+
       const ax = new cv.Mat(), ay = new cv.Mat();
-      cv.convertScaleAbs(gx, ax); cv.convertScaleAbs(gy, ay);
+      cv.convertScaleAbs(gx, ax);
+      cv.convertScaleAbs(gy, ay);
+
       const mag = new cv.Mat();
-      cv.addWeighted(ax, 0.6, ay, 0.6, 0, mag);
-      const norm = normalizeTo8U(mag);
-      const colored = applyJet(norm);
-      gray.delete(); gx.delete(); gy.delete(); ax.delete(); ay.delete(); mag.delete(); norm.delete();
-      return colored;
+      cv.addWeighted(ax, 0.5, ay, 0.5, 0, mag);
+
+      // normalize and color map
+      const norm = new cv.Mat();
+      cv.normalize(mag, norm, 0, 255, cv.NORM_MINMAX);
+      norm.convertTo(norm, cv.CV_8U);
+
+      const color = new cv.Mat();
+      cv.applyColorMap(norm, color, cv.COLORMAP_JET);
+
+      // BGR -> RGBA
+      const out = new cv.Mat();
+      cv.cvtColor(color, out, cv.COLOR_BGR2RGBA);
+
+      gray.delete(); gx.delete(); gy.delete(); ax.delete(); ay.delete(); mag.delete(); norm.delete(); color.delete();
+      return out;
     },
 
+    // 3) LoG → strong Laplacian, inverted look
     log: function(src) {
-      const gray = new cv.Mat(); cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-      const blur = new cv.Mat(); cv.GaussianBlur(gray, blur, new cv.Size(5,5), 0);
+      const gray = new cv.Mat(); 
+      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+
+      const blur = new cv.Mat();
+      cv.GaussianBlur(gray, blur, new cv.Size(5,5), 0);
+
       const lap = new cv.Mat();
       cv.Laplacian(blur, lap, cv.CV_16S, 3);
-      const lapAbs = new cv.Mat(); cv.convertScaleAbs(lap, lapAbs);
-      const norm = normalizeTo8U(lapAbs);
-      const colored = applyJet(norm);
-      gray.delete(); blur.delete(); lap.delete(); lapAbs.delete(); norm.delete();
-      return colored;
+
+      const lapAbs = new cv.Mat();
+      cv.convertScaleAbs(lap, lapAbs);
+
+      // invert for high contrast
+      const inv = new cv.Mat();
+      cv.bitwise_not(lapAbs, inv);
+
+      const out = new cv.Mat();
+      cv.cvtColor(inv, out, cv.COLOR_GRAY2RGBA);
+
+      gray.delete(); blur.delete(); lap.delete(); lapAbs.delete(); inv.delete();
+      return out;
     },
 
+    // 4) DoG → red/yellow structure map
     dog: function(src) {
-      const gray = new cv.Mat(); cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+      const gray = new cv.Mat(); 
+      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+
       const g1 = new cv.Mat(), g2 = new cv.Mat();
       cv.GaussianBlur(gray, g1, new cv.Size(3,3), 1.0);
       cv.GaussianBlur(gray, g2, new cv.Size(7,7), 2.5);
+
       const diff = new cv.Mat();
       cv.absdiff(g1, g2, diff);
-      // amplify
-      const amplified = new cv.Mat();
-      diff.convertTo(amplified, cv.CV_32F);
-      cv.multiply(amplified, cv.Mat.ones(amplified.rows, amplified.cols, amplified.type()), amplified);
-      // multiply by scalar 3.0 to amplify subtle differences
-      cv.multiply(amplified, new cv.Mat(amplified.rows, amplified.cols, amplified.type(), [3.0]), amplified);
-      const norm = normalizeTo8U(amplified);
-      const colored = applyJet(norm);
-      gray.delete(); g1.delete(); g2.delete(); diff.delete(); amplified.delete(); norm.delete();
-      return colored;
-    },
 
-    depthLike: function(src) {
-      // gradient magnitude + vertical weighting -> pseudo-depth color map
-      const gray = new cv.Mat(); cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-      const gx = new cv.Mat(), gy = new cv.Mat();
-      cv.Sobel(gray, gx, cv.CV_16S, 1, 0, 3);
-      cv.Sobel(gray, gy, cv.CV_16S, 0, 1, 3);
-      const ax = new cv.Mat(), ay = new cv.Mat();
-      cv.convertScaleAbs(gx, ax); cv.convertScaleAbs(gy, ay);
-      const mag = new cv.Mat(); cv.addWeighted(ax, 0.6, ay, 0.6, 0, mag);
+      // normalize to 0..255
+      const norm = new cv.Mat();
+      cv.normalize(diff, norm, 0, 255, cv.NORM_MINMAX);
+      norm.convertTo(norm, cv.CV_8U);
 
-      const rows = mag.rows, cols = mag.cols;
-      const weighted = new cv.Mat(rows, cols, mag.type());
-      for (let r = 0; r < rows; r++) {
-        const weight = 0.4 + 0.6 * (r / (rows - 1)); // 0.4 .. 1.0
-        for (let c = 0; c < cols; c++) {
-          weighted.ucharPtr(r,c)[0] = Math.min(255, Math.round(mag.ucharPtr(r,c)[0] * weight));
+      // convert to RGBA and tint red/yellow
+      const out = new cv.Mat();
+      cv.cvtColor(norm, out, cv.COLOR_GRAY2RGBA);
+      for (let r = 0; r < out.rows; r++) {
+        for (let c = 0; c < out.cols; c++) {
+          const v = out.ucharPtr(r,c)[0]; // gray value
+          // B,G,R roughly → orange/yellow ramp
+          out.ucharPtr(r,c)[0] = Math.min(255, v * 0.2);  // B
+          out.ucharPtr(r,c)[1] = Math.min(255, v * 0.8);  // G
+          out.ucharPtr(r,c)[2] = Math.min(255, v * 1.2);  // R
         }
       }
 
-      const norm = normalizeTo8U(weighted);
-      const colored = applyJet(norm);
-      gray.delete(); gx.delete(); gy.delete(); ax.delete(); ay.delete(); mag.delete(); weighted.delete(); norm.delete();
-      return colored;
+      gray.delete(); g1.delete(); g2.delete(); diff.delete(); norm.delete();
+      return out;
     },
 
+    // 5) Depth-like → vertical heatmap (bottom = near)
+    depthLike: function(src) {
+      const gray = new cv.Mat(); 
+      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+      const gx = new cv.Mat(), gy = new cv.Mat();
+      cv.Sobel(gray, gx, cv.CV_16S, 1, 0, 3);
+      cv.Sobel(gray, gy, cv.CV_16S, 0, 1, 3);
+
+      const ax = new cv.Mat(), ay = new cv.Mat();
+      cv.convertScaleAbs(gx, ax);
+      cv.convertScaleAbs(gy, ay);
+
+      const mag = new cv.Mat();
+      cv.addWeighted(ax, 0.5, ay, 0.5, 0, mag);
+
+      // apply vertical ramp
+      const rows = mag.rows, cols = mag.cols;
+      const weighted = new cv.Mat(rows, cols, mag.type());
+      for (let r = 0; r < rows; r++) {
+        const w = 0.3 + 0.7 * (r / (rows - 1)); // top dark, bottom bright
+        for (let c = 0; c < cols; c++) {
+          const v = mag.ucharPtr(r,c)[0];
+          weighted.ucharPtr(r,c)[0] = Math.min(255, Math.round(v * w));
+        }
+      }
+
+      const norm = new cv.Mat();
+      cv.normalize(weighted, norm, 0, 255, cv.NORM_MINMAX);
+      norm.convertTo(norm, cv.CV_8U);
+
+      const color = new cv.Mat();
+      cv.applyColorMap(norm, color, cv.COLORMAP_JET);
+      const out = new cv.Mat();
+      cv.cvtColor(color, out, cv.COLOR_BGR2RGBA);
+
+      gray.delete(); gx.delete(); gy.delete(); ax.delete(); ay.delete(); mag.delete(); weighted.delete(); norm.delete(); color.delete();
+      return out;
+    },
+
+    // 6) Segmentation → foreground tinted green, background dark
     segment: function(src) {
-      const gray = new cv.Mat(); cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+      const gray = new cv.Mat(); 
+      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+
       const mask = new cv.Mat();
       cv.threshold(gray, mask, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
 
-      // color-tint regions on a copy of original
-      const overlay = src.clone();
-      for (let r = 0; r < overlay.rows; r++) {
-        for (let c = 0; c < overlay.cols; c++) {
+      const out = src.clone();
+      for (let r = 0; r < out.rows; r++) {
+        for (let c = 0; c < out.cols; c++) {
           if (mask.ucharPtr(r,c)[0] > 0) {
-            overlay.ucharPtr(r,c)[1] = Math.min(255, overlay.ucharPtr(r,c)[1] + 90); // G + tint
-            overlay.ucharPtr(r,c)[0] = Math.max(0, overlay.ucharPtr(r,c)[0] - 40);   // B
-            overlay.ucharPtr(r,c)[2] = Math.max(0, overlay.ucharPtr(r,c)[2] - 40);   // R
+            // foreground → bright greenish
+            out.ucharPtr(r,c)[1] = Math.min(255, out.ucharPtr(r,c)[1] + 100); // G
+          } else {
+            // background → darkened
+            out.ucharPtr(r,c)[0] = out.ucharPtr(r,c)[0] * 0.3;
+            out.ucharPtr(r,c)[1] = out.ucharPtr(r,c)[1] * 0.3;
+            out.ucharPtr(r,c)[2] = out.ucharPtr(r,c)[2] * 0.3;
           }
         }
       }
 
       gray.delete(); mask.delete();
-      return overlay;
+      return out;
     }
   }; // end Modes
+
 
   // -----------------------
   // Features object
