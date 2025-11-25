@@ -51,7 +51,10 @@
       navigator.mediaDevices.enumerateDevices().then(devices => {
         const videoDevices = devices.filter(device => device.kind === 'videoinput');
         console.log("Video devices found:", videoDevices.length);
-        if (videoDevices.length > 1) {
+
+        // Show button if multiple cameras found OR if running on mobile (fallback for iOS privacy)
+        const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+        if (videoDevices.length > 1 || isMobile) {
           switchCameraBtn.style.display = 'inline-block';
         }
       }).catch(err => console.error("Error enumerating devices:", err));
