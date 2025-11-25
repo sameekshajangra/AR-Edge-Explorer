@@ -1,12 +1,9 @@
-// js/ui.js (robust, copy-paste replacement)
-// Works with index.html elements:
-//  video id="videoInput"
-//  canvas id="canvasOutput"
-//  select id="modeSelect"
-//  button id="screenshotBtn"
-//  span id="fpsLabel"
+// js/ui.js (Integrated: Modes + Features + Overlay + Robust UI loop + Screenshot fix)
+// Expects these HTML elements (ids): video, canvas, mode, screenshot, switchCamera, fps
+// Make sure modes/features/overlay scripts are NOT separately loaded if you replace them with this single file.
 
 (() => {
+  // --- UI elements ---
   const video = document.getElementById("video");
   const canvas = document.getElementById("canvas");
   const ctx = canvas.getContext("2d");
@@ -15,68 +12,272 @@
   const switchCameraBtn = document.getElementById("switchCamera");
   const fpsLabel = document.getElementById("fps");
 
+  // --- state ---
   let cvReady = false;
   let videoReady = false;
   let running = false;
   let lastFpsTime = performance.now();
   let frameCount = 0;
-
-  // Camera state
-  let currentFacingMode = 'environment'; // Default to back camera for AR
   let stream = null;
+  let currentFacingMode = "environment"; // try back camera first
 
-  // Start camera
+  // -----------------------
+  // Helper functions (used by modes)
+  // -----------------------
+  function normalizeTo8U(mat) {
+    const out = new cv.Mat();
+    cv.normalize(mat, out, 0, 255, cv.NORM_MINMAX);
+    out.convertTo(out, cv.CV_8U);
+    return out;
+  }
+
+  function applyJet(mat8u) {
+    const color = new cv.Mat();
+    cv.applyColorMap(mat8u, color, cv.COLORMAP_JET);
+    const out = new cv.Mat();
+    cv.cvtColor(color, out, cv.COLOR_BGR2RGBA);
+    color.delete();
+    return out;
+  }
+
+  // -----------------------
+  // Modes object (colorized, distinct outputs)
+  // -----------------------
+  const Modes = {
+    canny: function(src) {
+      const gray = new cv.Mat();
+      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+      const edges = new cv.Mat();
+      cv.Canny(gray, edges, 40, 120);
+
+      // Overlay edges (reddish tint) on original copy
+      const overlay = src.clone();
+      for (let r = 0; r < overlay.rows; r++) {
+        for (let c = 0; c < overlay.cols; c++) {
+          if (edges.ucharPtr(r, c)[0] > 0) {
+            // overlay: reduce G,B and boost R-ish (B,G,R,A order in Mat)
+            overlay.ucharPtr(r, c)[0] = Math.min(255, overlay.ucharPtr(r, c)[0] + 80); // B
+            overlay.ucharPtr(r, c)[1] = Math.max(0, overlay.ucharPtr(r, c)[1] - 80);   // G
+            overlay.ucharPtr(r, c)[2] = Math.max(0, overlay.ucharPtr(r, c)[2] - 80);   // R
+          }
+        }
+      }
+
+      gray.delete(); edges.delete();
+      return overlay;
+    },
+
+    sobel: function(src) {
+      const gray = new cv.Mat(); cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+      const gx = new cv.Mat(), gy = new cv.Mat();
+      cv.Sobel(gray, gx, cv.CV_16S, 1, 0, 3);
+      cv.Sobel(gray, gy, cv.CV_16S, 0, 1, 3);
+      const ax = new cv.Mat(), ay = new cv.Mat();
+      cv.convertScaleAbs(gx, ax); cv.convertScaleAbs(gy, ay);
+      const mag = new cv.Mat();
+      cv.addWeighted(ax, 0.6, ay, 0.6, 0, mag);
+      const norm = normalizeTo8U(mag);
+      const colored = applyJet(norm);
+      gray.delete(); gx.delete(); gy.delete(); ax.delete(); ay.delete(); mag.delete(); norm.delete();
+      return colored;
+    },
+
+    log: function(src) {
+      const gray = new cv.Mat(); cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+      const blur = new cv.Mat(); cv.GaussianBlur(gray, blur, new cv.Size(5,5), 0);
+      const lap = new cv.Mat();
+      cv.Laplacian(blur, lap, cv.CV_16S, 3);
+      const lapAbs = new cv.Mat(); cv.convertScaleAbs(lap, lapAbs);
+      const norm = normalizeTo8U(lapAbs);
+      const colored = applyJet(norm);
+      gray.delete(); blur.delete(); lap.delete(); lapAbs.delete(); norm.delete();
+      return colored;
+    },
+
+    dog: function(src) {
+      const gray = new cv.Mat(); cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+      const g1 = new cv.Mat(), g2 = new cv.Mat();
+      cv.GaussianBlur(gray, g1, new cv.Size(3,3), 1.0);
+      cv.GaussianBlur(gray, g2, new cv.Size(7,7), 2.5);
+      const diff = new cv.Mat();
+      cv.absdiff(g1, g2, diff);
+      // amplify
+      const amplified = new cv.Mat();
+      diff.convertTo(amplified, cv.CV_32F);
+      cv.multiply(amplified, cv.Mat.ones(amplified.rows, amplified.cols, amplified.type()), amplified);
+      // multiply by scalar 3.0 to amplify subtle differences
+      cv.multiply(amplified, new cv.Mat(amplified.rows, amplified.cols, amplified.type(), [3.0]), amplified);
+      const norm = normalizeTo8U(amplified);
+      const colored = applyJet(norm);
+      gray.delete(); g1.delete(); g2.delete(); diff.delete(); amplified.delete(); norm.delete();
+      return colored;
+    },
+
+    depthLike: function(src) {
+      // gradient magnitude + vertical weighting -> pseudo-depth color map
+      const gray = new cv.Mat(); cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+      const gx = new cv.Mat(), gy = new cv.Mat();
+      cv.Sobel(gray, gx, cv.CV_16S, 1, 0, 3);
+      cv.Sobel(gray, gy, cv.CV_16S, 0, 1, 3);
+      const ax = new cv.Mat(), ay = new cv.Mat();
+      cv.convertScaleAbs(gx, ax); cv.convertScaleAbs(gy, ay);
+      const mag = new cv.Mat(); cv.addWeighted(ax, 0.6, ay, 0.6, 0, mag);
+
+      const rows = mag.rows, cols = mag.cols;
+      const weighted = new cv.Mat(rows, cols, mag.type());
+      for (let r = 0; r < rows; r++) {
+        const weight = 0.4 + 0.6 * (r / (rows - 1)); // 0.4 .. 1.0
+        for (let c = 0; c < cols; c++) {
+          weighted.ucharPtr(r,c)[0] = Math.min(255, Math.round(mag.ucharPtr(r,c)[0] * weight));
+        }
+      }
+
+      const norm = normalizeTo8U(weighted);
+      const colored = applyJet(norm);
+      gray.delete(); gx.delete(); gy.delete(); ax.delete(); ay.delete(); mag.delete(); weighted.delete(); norm.delete();
+      return colored;
+    },
+
+    segment: function(src) {
+      const gray = new cv.Mat(); cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+      const mask = new cv.Mat();
+      cv.threshold(gray, mask, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
+
+      // color-tint regions on a copy of original
+      const overlay = src.clone();
+      for (let r = 0; r < overlay.rows; r++) {
+        for (let c = 0; c < overlay.cols; c++) {
+          if (mask.ucharPtr(r,c)[0] > 0) {
+            overlay.ucharPtr(r,c)[1] = Math.min(255, overlay.ucharPtr(r,c)[1] + 90); // G + tint
+            overlay.ucharPtr(r,c)[0] = Math.max(0, overlay.ucharPtr(r,c)[0] - 40);   // B
+            overlay.ucharPtr(r,c)[2] = Math.max(0, overlay.ucharPtr(r,c)[2] - 40);   // R
+          }
+        }
+      }
+
+      gray.delete(); mask.delete();
+      return overlay;
+    }
+  }; // end Modes
+
+  // -----------------------
+  // Features object
+  // -----------------------
+  const Features = {
+    detectORB: function(src) {
+      const gray = new cv.Mat(); cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+      const orb = new cv.ORB();
+      const keypoints = new cv.KeyPointVector();
+      try {
+        orb.detect(gray, keypoints);
+      } catch (e) {
+        console.warn("ORB detect error:", e);
+      }
+      gray.delete();
+      orb.delete();
+      return keypoints;
+    }
+  };
+
+  // -----------------------
+  // Overlay object
+  // -----------------------
+  const Overlay = {
+    drawKeypoints: function(src, keypoints) {
+      // Draw visible circles on a copy of source
+      const out = src.clone();
+      for (let i = 0; i < keypoints.size(); ++i) {
+        const kp = keypoints.get(i);
+        const x = Math.round(kp.pt.x), y = Math.round(kp.pt.y);
+        const r = Math.max(2, Math.round(kp.size / 2));
+        cv.circle(out, new cv.Point(x, y), r, [0, 255, 0, 255], 2);
+      }
+      return out;
+    },
+
+    arOverlayMode: function(src) {
+      // edge heatmap + contours -> boxes
+      const gray = new cv.Mat(); cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+      const edges = new cv.Mat(); cv.Canny(gray, edges, 50, 130);
+      const norm = normalizeTo8U(edges);
+      const heat = applyJet(norm); // RGBA
+
+      const th = new cv.Mat(); cv.threshold(gray, th, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
+      const contours = new cv.MatVector();
+      const hierarchy = new cv.Mat();
+      cv.findContours(th, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+      const out = src.clone();
+      // blend heatmap and original
+      cv.addWeighted(out, 0.6, heat, 0.5, 0, out);
+
+      for (let i = 0; i < contours.size(); i++) {
+        const cnt = contours.get(i);
+        const rect = cv.boundingRect(cnt);
+        // skip tiny regions
+        if (rect.width * rect.height < (src.rows * src.cols) * 0.002) {
+          cnt.delete();
+          continue;
+        }
+        cv.rectangle(out, new cv.Point(rect.x, rect.y), new cv.Point(rect.x + rect.width, rect.y + rect.height), [0, 255, 0, 255], 3);
+        cv.putText(out, "Region", new cv.Point(rect.x, Math.max(10, rect.y - 6)), cv.FONT_HERSHEY_SIMPLEX, 0.6, [0, 220, 0, 255], 2);
+        cnt.delete();
+      }
+
+      gray.delete(); edges.delete(); norm.delete(); heat.delete(); th.delete(); contours.delete(); hierarchy.delete();
+      return out;
+    }
+  };
+
+  // -----------------------
+  // Camera init & switching
+  // -----------------------
   async function startCamera() {
-    // Stop existing stream if any
     if (stream) {
-      stream.getTracks().forEach(track => track.stop());
+      stream.getTracks().forEach(t => t.stop());
+      stream = null;
     }
 
-    try {
-      // Constraints based on current mode
-      const constraints = {
-        video: {
-          facingMode: currentFacingMode,
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        },
-        audio: false
-      };
+    const constraints = {
+      video: {
+        facingMode: currentFacingMode,
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      },
+      audio: false
+    };
 
+    try {
       stream = await navigator.mediaDevices.getUserMedia(constraints);
       video.srcObject = stream;
 
-      // Check for available devices AFTER getting permission
-      // This is crucial for iOS/Android where devices are hidden until permission is granted
+      // enumerate devices to decide whether to show switch button
       navigator.mediaDevices.enumerateDevices().then(devices => {
-        const videoDevices = devices.filter(device => device.kind === 'videoinput');
-        console.log("Video devices found:", videoDevices.length);
-
-        // Show button if multiple cameras found OR if running on mobile (fallback for iOS privacy)
+        const videoDevices = devices.filter(d => d.kind === "videoinput");
         const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
         if (videoDevices.length > 1 || isMobile) {
-          switchCameraBtn.style.display = 'inline-block';
+          switchCameraBtn.style.display = "inline-block";
+        } else {
+          switchCameraBtn.style.display = "none";
         }
-      }).catch(err => console.error("Error enumerating devices:", err));
+      }).catch(e => console.warn("enumerateDevices error:", e));
 
-      // wait until metadata (size) is available
       video.addEventListener("loadedmetadata", () => {
-        // set canvas to video size (important)
         canvas.width = video.videoWidth || 640;
         canvas.height = video.videoHeight || 480;
         videoReady = true;
         console.log(`Video ready (${currentFacingMode}):`, canvas.width, "x", canvas.height);
         startIfReady();
-      });
+      }, { once: true });
+
     } catch (err) {
       console.error("Camera start failed:", err);
-      // Fallback: try without specific facing mode if the first attempt fails (e.g. on some laptops)
-      if (currentFacingMode === 'environment') {
-        console.log("Retrying with default constraints...");
+      // Fallback attempt without facingMode (some browsers/devices fail with facingMode constraint)
+      if (currentFacingMode === "environment") {
         try {
           stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
           video.srcObject = stream;
-        } catch (retryErr) {
+        } catch (e) {
           alert("Unable to access camera. Please allow camera access and reload the page.");
         }
       } else {
@@ -85,21 +286,22 @@
     }
   }
 
-  // Switch Camera Handler
+  // switch camera button handler
   switchCameraBtn.onclick = () => {
-    currentFacingMode = currentFacingMode === 'environment' ? 'user' : 'environment';
-    videoReady = false; // Reset ready state
+    currentFacingMode = currentFacingMode === "environment" ? "user" : "environment";
+    videoReady = false;
     startCamera();
   };
 
-  // OpenCV readiness
+  // -----------------------
+  // OpenCV readiness & start trigger
+  // -----------------------
   function onCvReady() {
     cvReady = true;
     console.log("OpenCV.js runtime initialized");
     startIfReady();
   }
 
-  // Helper: start processing only when both video and cv are ready
   function startIfReady() {
     if (cvReady && videoReady && !running) {
       running = true;
@@ -107,18 +309,9 @@
     }
   }
 
-  // Safe read of canvas into OpenCV Mat
-  function readSrcMat() {
-    try {
-      return cv.imread(canvas);
-    } catch (e) {
-      // fallback: create mat from video frame if imread fails
-      const tmp = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
-      cv.cvtColor(tmp, tmp, cv.COLOR_RGBA2RGB); // small no-op to keep consistent
-      return tmp;
-    }
-  }
-
+  // -----------------------
+  // FPS helper
+  // -----------------------
   function showFps() {
     frameCount++;
     const now = performance.now();
@@ -130,28 +323,37 @@
     }
   }
 
+  // -----------------------
   // Main processing loop
+  // -----------------------
   function processLoop() {
     if (!cvReady || !videoReady) {
       requestAnimationFrame(processLoop);
       return;
     }
 
-    // ensure canvas size = video size (in case of dynamic change)
+    // adapt canvas size if dynamic
     if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
       canvas.width = video.videoWidth || canvas.width;
       canvas.height = video.videoHeight || canvas.height;
     }
 
-    // draw latest video frame onto canvas (source for cv.imread)
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    // draw frame to canvas as source
+    try {
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    } catch (err) {
+      // drawImage may fail transiently (e.g., mobile browser); skip this frame
+      console.warn("drawImage failed:", err);
+      requestAnimationFrame(processLoop);
+      return;
+    }
 
-    // Now read into OpenCV
+    // read into OpenCV Mat
     let src = null;
     try {
       src = cv.imread(canvas); // RGBA Mat
     } catch (err) {
-      console.warn("cv.imread failed, skipping frame:", err);
+      console.warn("cv.imread failed:", err);
       if (src) src.delete();
       requestAnimationFrame(processLoop);
       return;
@@ -161,37 +363,32 @@
     const mode = modeSelect.value;
 
     try {
-      // Call functions defined in your other js files (modes.js/features.js/etc.)
       if (mode === "canny") dst = Modes.canny(src);
       else if (mode === "sobel") dst = Modes.sobel(src);
       else if (mode === "log") dst = Modes.log(src);
       else if (mode === "dog") dst = Modes.dog(src);
-      else if (mode === "depth") { dst = Modes.depthLike(src); cv.cvtColor(dst, dst, cv.COLOR_GRAY2RGBA); }
-      else if (mode === "segment") { dst = Modes.segment(src); cv.cvtColor(dst, dst, cv.COLOR_GRAY2RGBA); }
+      else if (mode === "depth") dst = Modes.depthLike(src); // already RGBA
+      else if (mode === "segment") dst = Modes.segment(src); // already RGBA
       else if (mode === "features") {
-        let kps = Features.detectORB(src);
+        const kps = Features.detectORB(src);
         dst = Overlay.drawKeypoints(src, kps);
-        kps.delete();
-      }
-      else if (mode === "ar") {
-        let edges = Modes.canny(src);
-        cv.cvtColor(edges, edges, cv.COLOR_GRAY2RGBA);
+        // keypoints vector deleted inside drawKeypoints? we created it here so delete it
+        try { kps.delete(); } catch (e) {}
+      } else if (mode === "ar") {
+        dst = Overlay.arOverlayMode(src);
+      } else {
         dst = src.clone();
-        cv.addWeighted(dst, 0.7, edges, 0.7, 0, dst);
-        edges.delete();
       }
-      else dst = src.clone();
     } catch (err) {
       console.error("Processing error:", err);
       if (dst) { dst.delete(); dst = null; }
       dst = src.clone();
     }
 
-    // Display
+    // show output (convert single-channel to RGBA if needed)
     try {
-      // If dst is single-channel, convert to RGBA for consistent display
-      if (dst && dst.type() === cv.CV_8UC1) {
-        let colorOut = new cv.Mat();
+      if (dst && dst.type && dst.type() === cv.CV_8UC1) {
+        const colorOut = new cv.Mat();
         cv.cvtColor(dst, colorOut, cv.COLOR_GRAY2RGBA);
         cv.imshow(canvas, colorOut);
         colorOut.delete();
@@ -210,27 +407,23 @@
     requestAnimationFrame(processLoop);
   }
 
+  // -----------------------
   // Screenshot handler (robust)
+  // -----------------------
   screenshotBtn.addEventListener("click", () => {
-    // Check if camera is ready
     if (!videoReady) {
-      alert('Camera is not ready yet. Please wait for the video feed to start.');
+      alert("Camera is not ready yet. Please wait.");
       return;
     }
 
-    // UI Feedback
     const originalText = screenshotBtn.textContent;
-    screenshotBtn.textContent = 'Capturing...';
+    screenshotBtn.textContent = "Capturing...";
     screenshotBtn.disabled = true;
 
-    // ensure canvas has current video frame before saving
-    try {
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    } catch (e) {
-      console.warn("drawImage before screenshot failed:", e);
-    }
+    // ensure latest frame is drawn
+    try { ctx.drawImage(video, 0, 0, canvas.width, canvas.height); } catch (e) { console.warn("drawImage for screenshot:", e); }
 
-    // use toBlob for reliable binary output
+    // toBlob ensures a real binary PNG (avoids 0-byte/zip problems)
     canvas.toBlob((blob) => {
       if (!blob) {
         alert("Screenshot failed: canvas not ready.");
@@ -247,49 +440,42 @@
       a.remove();
       URL.revokeObjectURL(url);
 
-      console.log('Screenshot saved successfully');
-      screenshotBtn.textContent = 'Screenshot Saved!';
-
-      // Reset button after 1.5 seconds
+      screenshotBtn.textContent = "Saved!";
       setTimeout(() => {
-        screenshotBtn.textContent = 'Save Screenshot';
+        screenshotBtn.textContent = "Save Screenshot";
         screenshotBtn.disabled = false;
-      }, 1500);
+      }, 1200);
     }, "image/png");
   });
 
-  // Bind OpenCV init hook
+  // -----------------------
+  // Bind OpenCV readiness
+  // -----------------------
   if (typeof cv !== "undefined") {
-    if (cv['onRuntimeInitialized']) {
-      // Some pages set onRuntimeInitialized before cv is ready; ensure we attach
-      cv['onRuntimeInitialized'] = () => {
-        onCvReady();
-      };
+    // Attach onRuntimeInitialized safely
+    if (cv['onRuntimeInitialized'] !== undefined) {
+      cv['onRuntimeInitialized'] = () => onCvReady();
     } else {
-      // fallback: poll cv until ready
+      // Poll until cv is ready
       const poll = setInterval(() => {
-        if (cv && cv['onRuntimeInitialized']) {
-          clearInterval(poll);
-          cv['onRuntimeInitialized'] = () => onCvReady();
-        } else if (cv && typeof cv['getBuildInformation'] === 'function') {
-          // already ready
+        if (cv && (typeof cv['getBuildInformation'] === 'function')) {
           clearInterval(poll);
           onCvReady();
         }
       }, 200);
     }
   } else {
-    console.warn("OpenCV.js not found on page; ensure script src is correct.");
+    console.warn("OpenCV.js not loaded. Check script src in index.html.");
   }
 
-  // Start camera immediately (will set videoReady when metadata available)
+  // start camera now
   startCamera();
 
-  // Developer helper: expose debug function
+  // developer helper
   window.__arEdgeDebug = {
     isCvReady: () => cvReady,
     isVideoReady: () => videoReady,
     isRunning: () => running
   };
 
-})();
+})(); // end of IIFE
