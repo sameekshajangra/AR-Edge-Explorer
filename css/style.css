@@ -1,0 +1,6 @@
+body { font-family: Arial, Helvetica, sans-serif; background:#111; color:#eee; text-align:center; margin:0; padding:12px; }
+header { margin-bottom:8px; }
+.controls { margin:8px 0; }
+video, canvas { width:80%; max-width:900px; border:1px solid #444; margin-top:8px; }
+#fps { margin-left:12px; color:#9bd; font-weight:600; }
+button{ padding:6px 10px; margin-left:6px; }

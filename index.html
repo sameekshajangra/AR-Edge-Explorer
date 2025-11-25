@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>AR Edge Explorer</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header><h1>AR Edge Explorer</h1><p>Real-time CV modes — OpenCV.js</p></header>
+
+  <section class="controls">
+    <select id="mode">
+      <option value="canny">Canny Edges</option>
+      <option value="sobel">Sobel</option>
+      <option value="log">LoG</option>
+      <option value="dog">DoG</option>
+      <option value="features">ORB Features</option>
+      <option value="depth">Depth-like Map</option>
+      <option value="segment">Segmentation</option>
+      <option value="ar">AR Overlay</option>
+    </select>
+    <button id="screenshot">Save Screenshot</button>
+    <span id="fps">FPS: --</span>
+  </section>
+
+  <main>
+    <video id="video" autoplay playsinline></video>
+    <canvas id="canvas"></canvas>
+  </main>
+
+  <script async src="https://docs.opencv.org/4.x/opencv.js" onload="console.log('OpenCV loaded')"></script>
+  <script src="js/preprocess.js"></script>
+  <script src="js/features.js"></script>
+  <script src="js/modes.js"></script>
+  <script src="js/overlay.js"></script>
+  <script src="js/ui.js"></script>
+</body>
+</html>
