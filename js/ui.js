@@ -7,12 +7,12 @@
 //  span id="fpsLabel"
 
 (() => {
-  const video = document.getElementById("videoInput");
-  const canvas = document.getElementById("canvasOutput");
+  const video = document.getElementById("video");
+  const canvas = document.getElementById("canvas");
   const ctx = canvas.getContext("2d");
-  const modeSelect = document.getElementById("modeSelect");
-  const screenshotBtn = document.getElementById("screenshotBtn");
-  const fpsLabel = document.getElementById("fpsLabel");
+  const modeSelect = document.getElementById("mode");
+  const screenshotBtn = document.getElementById("screenshot");
+  const fpsLabel = document.getElementById("fps");
 
   let cvReady = false;
   let videoReady = false;
@@ -23,7 +23,7 @@
   // Start camera
   async function startCamera() {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 }, audio: false });
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
       video.srcObject = stream;
 
       // wait until metadata (size) is available
@@ -111,14 +111,24 @@
 
     try {
       // Call functions defined in your other js files (modes.js/features.js/etc.)
-      if (mode === "canny") dst = cannyMode(src);
-      else if (mode === "sobel") dst = sobelMode(src);
-      else if (mode === "log") dst = logMode(src);
-      else if (mode === "dog") dst = dogMode(src);
-      else if (mode === "depth") dst = depthMode(src);
-      else if (mode === "segment") dst = segmentMode(src);
-      else if (mode === "features") dst = featureMode(src);
-      else if (mode === "ar") dst = arOverlayMode(src);
+      if (mode === "canny") dst = Modes.canny(src);
+      else if (mode === "sobel") dst = Modes.sobel(src);
+      else if (mode === "log") dst = Modes.log(src);
+      else if (mode === "dog") dst = Modes.dog(src);
+      else if (mode === "depth") { dst = Modes.depthLike(src); cv.cvtColor(dst, dst, cv.COLOR_GRAY2RGBA); }
+      else if (mode === "segment") { dst = Modes.segment(src); cv.cvtColor(dst, dst, cv.COLOR_GRAY2RGBA); }
+      else if (mode === "features") {
+        let kps = Features.detectORB(src);
+        dst = Overlay.drawKeypoints(src, kps);
+        kps.delete();
+      }
+      else if (mode === "ar") {
+        let edges = Modes.canny(src);
+        cv.cvtColor(edges, edges, cv.COLOR_GRAY2RGBA);
+        dst = src.clone();
+        cv.addWeighted(dst, 0.7, edges, 0.7, 0, dst);
+        edges.delete();
+      }
       else dst = src.clone();
     } catch (err) {
       console.error("Processing error:", err);
@@ -151,6 +161,17 @@
 
   // Screenshot handler (robust)
   screenshotBtn.addEventListener("click", () => {
+    // Check if camera is ready
+    if (!videoReady) {
+      alert('Camera is not ready yet. Please wait for the video feed to start.');
+      return;
+    }
+
+    // UI Feedback
+    const originalText = screenshotBtn.textContent;
+    screenshotBtn.textContent = 'Capturing...';
+    screenshotBtn.disabled = true;
+
     // ensure canvas has current video frame before saving
     try {
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
@@ -162,6 +183,8 @@
     canvas.toBlob((blob) => {
       if (!blob) {
         alert("Screenshot failed: canvas not ready.");
+        screenshotBtn.textContent = originalText;
+        screenshotBtn.disabled = false;
         return;
       }
       const url = URL.createObjectURL(blob);
@@ -172,6 +195,15 @@
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
+
+      console.log('Screenshot saved successfully');
+      screenshotBtn.textContent = 'Screenshot Saved!';
+
+      // Reset button after 1.5 seconds
+      setTimeout(() => {
+        screenshotBtn.textContent = 'Save Screenshot';
+        screenshotBtn.disabled = false;
+      }, 1500);
     }, "image/png");
   });
 
