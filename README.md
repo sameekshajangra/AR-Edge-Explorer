@@ -1,4 +1,4 @@
-# AR Edge Explorer
+# AR Edge Explorer .
 
 Browser demo of real-time CV modes using OpenCV.js.
 Features: Canny, Sobel, LoG, DoG, ORB features, depth-like gradient and segmentation. Works in browser (GitHub Pages).
