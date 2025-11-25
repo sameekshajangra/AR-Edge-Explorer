@@ -12,6 +12,7 @@
   const ctx = canvas.getContext("2d");
   const modeSelect = document.getElementById("mode");
   const screenshotBtn = document.getElementById("screenshot");
+  const switchCameraBtn = document.getElementById("switchCamera");
   const fpsLabel = document.getElementById("fps");
 
   let cvReady = false;
@@ -20,10 +21,37 @@
   let lastFpsTime = performance.now();
   let frameCount = 0;
 
+  // Camera state
+  let currentFacingMode = 'environment'; // Default to back camera for AR
+  let stream = null;
+
   // Start camera
   async function startCamera() {
+    // Stop existing stream if any
+    if (stream) {
+      stream.getTracks().forEach(track => track.stop());
+    }
+
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+      // Check for available devices to decide whether to show switch button
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoDevices = devices.filter(device => device.kind === 'videoinput');
+
+      if (videoDevices.length > 1) {
+        switchCameraBtn.style.display = 'inline-block';
+      }
+
+      // Constraints based on current mode
+      const constraints = {
+        video: {
+          facingMode: currentFacingMode,
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        },
+        audio: false
+      };
+
+      stream = await navigator.mediaDevices.getUserMedia(constraints);
       video.srcObject = stream;
 
       // wait until metadata (size) is available
@@ -32,14 +60,32 @@
         canvas.width = video.videoWidth || 640;
         canvas.height = video.videoHeight || 480;
         videoReady = true;
-        console.log("Video ready:", canvas.width, "x", canvas.height);
+        console.log(`Video ready (${currentFacingMode}):`, canvas.width, "x", canvas.height);
         startIfReady();
       });
     } catch (err) {
       console.error("Camera start failed:", err);
-      alert("Unable to access camera. Please allow camera access and reload the page.");
+      // Fallback: try without specific facing mode if the first attempt fails (e.g. on some laptops)
+      if (currentFacingMode === 'environment') {
+        console.log("Retrying with default constraints...");
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+          video.srcObject = stream;
+        } catch (retryErr) {
+          alert("Unable to access camera. Please allow camera access and reload the page.");
+        }
+      } else {
+        alert("Unable to access camera. Please allow camera access and reload the page.");
+      }
     }
   }
+
+  // Switch Camera Handler
+  switchCameraBtn.onclick = () => {
+    currentFacingMode = currentFacingMode === 'environment' ? 'user' : 'environment';
+    videoReady = false; // Reset ready state
+    startCamera();
+  };
 
   // OpenCV readiness
   function onCvReady() {
